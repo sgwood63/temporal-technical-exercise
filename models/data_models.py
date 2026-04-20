@@ -48,6 +48,8 @@ class AverageResult:
     review_count: int
     breakdown: SentimentBreakdown
     scores: list[SentimentScore] = field(default_factory=list)
+    reviews: list["Review"] = field(default_factory=list)
+    source: str = ""
     run_id: Optional[str] = None  # populated by store_results_activity after DB insert
 
 

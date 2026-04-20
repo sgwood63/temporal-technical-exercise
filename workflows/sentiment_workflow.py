@@ -135,6 +135,8 @@ class SentimentAnalysisWorkflow:
             review_count=len(scores),
             breakdown=breakdown,
             scores=scores,
+            reviews=reviews,
+            source=config.scraper_type,
         )
 
         # ── Stage 4: Store ───────────────────────────────────────────────────

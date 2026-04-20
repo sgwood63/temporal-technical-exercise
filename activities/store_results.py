@@ -21,12 +21,22 @@ async def store_results_activity(result: AverageResult) -> AverageResult:
 
         cursor.execute(
             """INSERT INTO analysis_runs
-               (product_id, product_name, run_at, review_count, avg_score, status)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (product_id, product_name, run_at, review_count, avg_score, status, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (result.product_id, result.product_name, now,
-             result.review_count, result.avg_compound, "completed"),
+             result.review_count, result.avg_compound, "completed", result.source),
         )
         run_id = cursor.lastrowid
+
+        for review in result.reviews:
+            cursor.execute(
+                """INSERT INTO reviews
+                   (run_id, review_id, reviewer, rating, title, text, date, source, verified)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run_id, review.review_id, review.reviewer, review.rating,
+                 review.title, review.text, review.date, review.source,
+                 int(review.verified_purchase)),
+            )
 
         for score in result.scores:
             cursor.execute(

@@ -17,7 +17,7 @@ from activities.store_results import store_results_activity
 from db.init_db import init_db
 from workflows.sentiment_workflow import SentimentAnalysisWorkflow
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 async def main() -> None:

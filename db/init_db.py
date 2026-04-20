@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     run_at       TEXT    NOT NULL,
     review_count INTEGER NOT NULL,
     avg_score    REAL    NOT NULL,
-    status       TEXT    NOT NULL
+    status       TEXT    NOT NULL,
+    source       TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS reviews (

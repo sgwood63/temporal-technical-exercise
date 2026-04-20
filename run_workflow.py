@@ -25,7 +25,7 @@ from temporalio.client import Client, TLSConfig
 from models.data_models import ProductConfig
 from workflows.sentiment_workflow import SentimentAnalysisWorkflow
 
-load_dotenv()
+load_dotenv(override=True)
 
 _DEFAULT = ProductConfig(
     product_name="Sony WH-1000XM5 Headphones",
