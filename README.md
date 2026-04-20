@@ -71,10 +71,60 @@ temporal-technical-exercise/
 │   └── data_models.py          # all dataclasses (ProductConfig, Review, …)
 ├── db/
 │   └── init_db.py              # SQLite schema creation
+├── tests/
+│   ├── conftest.py             # shared fixtures (WorkflowEnvironment, ProductConfig)
+│   └── test_workflow.py        # 8 workflow tests
+├── pytest.ini
 ├── CLAUDE.md                   # Claude Code guidelines for this project
 ├── requirements.txt
 └── .env.example
 ```
+
+---
+
+## Testing
+
+The test suite exercises `SentimentAnalysisWorkflow` end-to-end. Two modes are supported:
+
+**Local (default)** — uses Temporal's in-process test server (`WorkflowEnvironment.start_time_skipping()`), which skips retry backoffs so all 8 tests complete in under a second. No Temporal Cloud connection or running worker needed.
+
+```bash
+pytest tests/ -v
+```
+
+**Temporal Cloud** — connects to your real Temporal Cloud namespace so workflow executions appear in the Cloud UI. Requires a populated `.env` and no separate worker process (each test spins up its own embedded worker).
+
+```bash
+pytest tests/ -v --temporal-cloud
+```
+
+All 8 tests run against cloud. The three final-failure tests exhaust all retry attempts with real backoff delays — this is the most interesting thing to observe in the Cloud UI: the full retry history, the backoff progression between attempts, and the final `WorkflowExecutionFailed` status. Expect the full suite to take ~2 minutes in cloud mode (the store final-failure test alone waits ~75 s across 5 retry intervals).
+
+To find test executions in the UI, filter by:
+```
+WorkflowId STARTS_WITH "test-"
+```
+or by task queue `test-sentiment-tq` (kept separate from the production task queue).
+
+### What is tested
+
+| Test | Scenario |
+|---|---|
+| `test_happy_path` | All three activities succeed on the first attempt |
+| `test_scrape_occasional_failure` | `scrape_reviews_activity` fails twice, succeeds on the 3rd (retry limit: 3) |
+| `test_sentiment_occasional_failure` | `analyze_sentiment_activity` fails once per review, succeeds on the 2nd (retry limit: 2); uses per-review-id counters to stay deterministic across `asyncio.gather` fan-out |
+| `test_store_occasional_failure` | `store_results_activity` fails four times, succeeds on the 5th (retry limit: 5) |
+| `test_scrape_final_failure` | `scrape_reviews_activity` exhausts all 3 attempts → `WorkflowFailureError` |
+| `test_sentiment_final_failure` | `analyze_sentiment_activity` exhausts both attempts for every review → `WorkflowFailureError` |
+| `test_store_final_failure` | `store_results_activity` exhausts all 5 attempts → `WorkflowFailureError` |
+| `test_query_handler_progress` | `get_progress()` query returns a valid `WorkflowProgress` with a recognized `stage` |
+
+### Design notes
+
+- **Mock activities** are registered under the real activity names (`@activity.defn(name="scrape_reviews_activity")` etc.) so the unmodified workflow code dispatches to them.
+- **Failure simulation** uses mutable-dict closures — each call to `make_scrape_activity(fail_times)` creates an independent counter, ensuring no state leaks between tests.
+- **Function-scoped environment** — each test gets its own `WorkflowEnvironment` (or Cloud client) and `Worker`, ensuring the time-skipping test server and the Worker always share the same event loop. This guarantees reliable time-skipping at the cost of ~0.1 s per test for server startup.
+- **Isolation in Temporal Cloud**: test workflow IDs are prefixed with `test-` and run on the `test-sentiment-tq` task queue, keeping them visually and operationally separate from any production workflows in the same namespace.
 
 ---
 

@@ -35,3 +35,7 @@ I am going to use Claude Code to help with the implementation. I have already us
 1. The script should result in sentiment analysis data being placed in a database for downstream analysis.
 2. The use case specifies scraping reviews by product, which implies hitting public ecommerce sites like Amazon. I can imagine that such sites will not like such scraping: requiring authentication, not wanting automated scraping - so the overall process will need to work out the best approach to make the scraping succeed and deal with errors.
 3. Scraping each ecommerce web site will have its own challenges. I think there is a GenAI process to be applied to each site to configure scraping, so the script does not have to work it out. Or could a step in the workflow be to configure the scraping process for a site if it has not been seen before? And store the configuration for reuse later.
+
+## Testing
+
+I want tests for the workflows that include occasional and final failures for all the activities. There needs to be an option to test using Temporal Cloud, with indications that these are test workflows.
