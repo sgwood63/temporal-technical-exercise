@@ -35,7 +35,7 @@ flowchart TD
 
     J[Query: get_progress] -.->|WorkflowProgress| C
 
-    H --> K[(SQLite DB\nanalysis_runs\nsentiment_scores)]
+    H --> K[(SQLite DB\nanalysis_runs\nreviews\nsentiment_scores)]
 ```
 
 ### Key design decisions
@@ -121,7 +121,25 @@ python run_workflow.py --query-only sentiment-B09XS7JWHH-abc12345
 
 **Verify the database was written**
 ```bash
-sqlite3 sentiment_results.db "SELECT id, product_name, review_count, avg_score FROM analysis_runs;"
+# Summary of each analysis run
+sqlite3 sentiment_results.db "SELECT id, product_name, source, review_count, avg_score, status, run_at FROM analysis_runs;"
+
+# Reviews stored for a specific run (replace 1 with the run id)
+sqlite3 sentiment_results.db "SELECT review_id, reviewer, rating, title FROM reviews WHERE run_id = 1;"
+
+# Sentiment scores joined to review text
+sqlite3 sentiment_results.db "
+SELECT r.reviewer, r.rating, r.title, s.compound, s.positive, s.negative, s.neutral
+FROM reviews r
+JOIN sentiment_scores s ON s.review_id = r.review_id AND s.run_id = r.run_id
+ORDER BY s.compound DESC
+LIMIT 20;"
+
+# Row counts across all three tables
+sqlite3 sentiment_results.db "
+SELECT 'analysis_runs' AS tbl, COUNT(*) AS rows FROM analysis_runs
+UNION ALL SELECT 'reviews', COUNT(*) FROM reviews
+UNION ALL SELECT 'sentiment_scores', COUNT(*) FROM sentiment_scores;"
 ```
 
 ---
