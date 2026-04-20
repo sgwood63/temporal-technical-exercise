@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from datetime import datetime, timezone
 
@@ -5,6 +6,8 @@ from temporalio import activity
 
 from db.init_db import DB_PATH
 from models.data_models import AverageResult
+
+logger = logging.getLogger(__name__)
 
 
 @activity.defn
@@ -49,6 +52,8 @@ async def store_results_activity(result: AverageResult) -> AverageResult:
 
         conn.commit()
         result.run_id = str(run_id)
+        logger.info("Stored results — product=%s run_id=%d reviews=%d avg_compound=%+.4f",
+                    result.product_name, run_id, result.review_count, result.avg_compound)
         return result
     finally:
         conn.close()

@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 sentiment_results.db
+logging.json
+logs/
+!logs/.gitkeep

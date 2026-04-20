@@ -5,6 +5,7 @@ Run this in one terminal before starting any workflows:
 """
 
 import asyncio
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -15,9 +16,13 @@ from activities.analyze_sentiment import analyze_sentiment_activity
 from activities.scrape_reviews import scrape_reviews_activity
 from activities.store_results import store_results_activity
 from db.init_db import init_db
+from logging_config import configure_logging
 from workflows.sentiment_workflow import SentimentAnalysisWorkflow
 
 load_dotenv(override=True)
+configure_logging(config_file=os.environ.get("LOG_CONFIG"))
+
+logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
@@ -47,7 +52,7 @@ async def main() -> None:
         ],
     )
 
-    print(f"Worker started. Namespace: {os.environ['TEMPORAL_NAMESPACE']}  Queue: {task_queue}")
+    logger.info("Worker started — namespace=%s queue=%s", os.environ["TEMPORAL_NAMESPACE"], task_queue)
     await worker.run()
 
 

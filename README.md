@@ -1,5 +1,21 @@
 # Temporal Technical Exercise — Product Review Sentiment Pipeline
 
+## Table of Contents
+
+- [Introduction](#introduction)
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
+- [Temporal Patterns Demonstrated](#temporal-patterns-demonstrated)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Running](#running)
+- [Testing](#testing)
+- [Logging](#logging)
+- [Extending to Real Amazon Scraping](#extending-to-real-amazon-scraping)
+- [Notes on Design Choices](#notes-on-design-choices)
+
+---
+
 ## Introduction
 
 This project is the SA Technical Interview exercise for Temporal. The chosen use case:
@@ -7,6 +23,8 @@ This project is the SA Technical Interview exercise for Temporal. The chosen use
 > **A company wants to understand customer sentiment for one of their products. Write a pipeline that scrapes reviews of the product online and runs sentiment analysis on them. Average the sentiment scores to get an overall score for the product.**
 
 The implementation is a Python pipeline built on the Temporal Python SDK, connected to Temporal Cloud. It demonstrates core Temporal patterns: workflow orchestration, activity separation, fan-out/fan-in parallelism, heartbeating, retry policies, and live Query handlers.
+
+See [INITIAL-SPEC.md](INITIAL-SPEC.md) for the spec Sherman gave to Claude Code that generated the code, tests and documentation.
 
 See [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md) for the full design rationale.
 
@@ -82,6 +100,110 @@ temporal-technical-exercise/
 
 ---
 
+## Temporal Patterns Demonstrated
+
+| Pattern | Where |
+|---|---|
+| `@workflow.defn` / `@workflow.run` | `workflows/sentiment_workflow.py` |
+| `@activity.defn` | `activities/*.py` |
+| Heartbeating (`activity.heartbeat`) | `activities/scrape_reviews.py` → `scrapers/mock_scraper.py` |
+| Retry policies with exponential backoff | module-level constants in `sentiment_workflow.py` |
+| Fan-out / fan-in (`asyncio.gather`) | `sentiment_workflow.py` Stage 2 |
+| Query handler (`@workflow.query`) | `SentimentAnalysisWorkflow.get_progress` |
+| Temporal Cloud connection (TLS + API key) | `worker.py`, `run_workflow.py` |
+| Workflow determinism | no randomness or I/O in workflow code; all side effects in activities |
+| Idempotent activity design | mock scraper seeded on `product_id + page` → safe to retry |
+
+---
+
+## Prerequisites
+
+- Python 3.11+
+- A [Temporal Cloud](https://cloud.temporal.io) account with a namespace and API key
+
+---
+
+## Setup
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env and fill in TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE, TEMPORAL_API_KEY
+```
+
+---
+
+## Running
+
+Open two terminal windows.
+
+**Terminal 1 — start the worker**
+```bash
+python worker.py
+```
+
+`worker.py` has no CLI flags. All configuration is via environment variables (set in `.env`):
+
+| Variable | Required | Description |
+|---|---|---|
+| `TEMPORAL_ADDRESS` | yes | Temporal Cloud gRPC endpoint, e.g. `<namespace>.tmprl.cloud:7233` |
+| `TEMPORAL_NAMESPACE` | yes | Temporal Cloud namespace |
+| `TEMPORAL_API_KEY` | yes | Temporal Cloud API key |
+| `TASK_QUEUE` | yes | Task queue name the worker polls |
+| `LOG_CONFIG` | no | Path to a JSON `dictConfig` logging file; defaults to `logging.json` if present (see [Logging](#logging)) |
+
+**Terminal 2 — run a sentiment analysis workflow**
+```bash
+# Default product: Sony WH-1000XM5 Headphones, 15 reviews, mock scraper
+python run_workflow.py
+
+# Custom product
+python run_workflow.py --product-name "Kindle Paperwhite" --product-id B09SWRYPB9 --max-reviews 20
+
+# Query live progress of a running workflow (paste the workflow ID from Terminal 2 output)
+python run_workflow.py --query-only sentiment-B09XS7JWHH-abc12345
+```
+
+`run_workflow.py` CLI options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--product-name TEXT` | `Sony WH-1000XM5 Headphones` | Display name of the product to analyse |
+| `--product-id TEXT` | `B09XS7JWHH` | Unique product identifier (used as part of the workflow ID) |
+| `--source-url TEXT` | `https://www.amazon.com/dp/B09XS7JWHH` | Source URL passed to the scraper |
+| `--max-reviews INT` | `15` | Maximum number of reviews to scrape |
+| `--scraper {mock,amazon}` | `mock` | Scraper plugin to use |
+| `--query-only WORKFLOW_ID` | — | Print live progress for an already-running workflow and exit |
+| `--log-config PATH` | `logging.json` if present | Path to a JSON `dictConfig` logging file (see [Logging](#logging)) |
+
+**Verify the database was written**
+```bash
+# Summary of each analysis run
+sqlite3 sentiment_results.db "SELECT id, product_name, source, review_count, avg_score, status, run_at FROM analysis_runs;"
+
+# Reviews stored for a specific run (replace 1 with the run id)
+sqlite3 sentiment_results.db "SELECT review_id, reviewer, rating, title FROM reviews WHERE run_id = 1;"
+
+# Sentiment scores joined to review text
+sqlite3 sentiment_results.db "
+SELECT r.reviewer, r.rating, r.title, s.compound, s.positive, s.negative, s.neutral
+FROM reviews r
+JOIN sentiment_scores s ON s.review_id = r.review_id AND s.run_id = r.run_id
+ORDER BY s.compound DESC
+LIMIT 20;"
+
+# Row counts across all three tables
+sqlite3 sentiment_results.db "
+SELECT 'analysis_runs' AS tbl, COUNT(*) AS rows FROM analysis_runs
+UNION ALL SELECT 'reviews', COUNT(*) FROM reviews
+UNION ALL SELECT 'sentiment_scores', COUNT(*) FROM sentiment_scores;"
+```
+
+---
+
 ## Testing
 
 The test suite exercises `SentimentAnalysisWorkflow` end-to-end. Two modes are supported:
@@ -90,6 +212,7 @@ The test suite exercises `SentimentAnalysisWorkflow` end-to-end. Two modes are s
 
 ```bash
 pytest tests/ -v
+# DEBUG-level log written to logs/pytest.log by default
 ```
 
 **Temporal Cloud** — connects to your real Temporal Cloud namespace so workflow executions appear in the Cloud UI. Requires a populated `.env` and no separate worker process (each test spins up its own embedded worker).
@@ -128,85 +251,60 @@ or by task queue `test-sentiment-tq` (kept separate from the production task que
 
 ---
 
-## Prerequisites
+## Logging
 
-- Python 3.11+
-- A [Temporal Cloud](https://cloud.temporal.io) account with a namespace and API key
+### Default behavior
 
----
+Both entry points automatically load [`logging.json`](logging.json) when it is present in the working directory. The default config writes `INFO`-level logs to stdout **and** to a rotating file at `logs/temporal_pipeline.log` (10 MB per file, 5 backups):
 
-## Setup
-
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Configure environment
-cp .env.example .env
-# Edit .env and fill in TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE, TEMPORAL_API_KEY
+```
+2026-04-20T14:32:01 INFO     worker — Worker started — namespace=prod.acme queue=sentiment-tq
+2026-04-20T14:32:03 INFO     activities.scrape_reviews — Scrape complete — product_id=B09XS7JWHH reviews=15
+2026-04-20T14:32:04 INFO     activities.store_results — Stored results — product=Sony WH-1000XM5 run_id=7 …
 ```
 
----
+Tests write a full `DEBUG`-level log to `logs/pytest.log` via `pytest.ini`.
 
-## Running
+### Overriding the config
 
-Open two terminal windows.
+Supply a different JSON file that follows Python's [`logging.config.dictConfig`](https://docs.python.org/3/library/logging.config.html#logging-config-dictschema) schema:
 
-**Terminal 1 — start the worker**
 ```bash
-python worker.py
+# worker.py — override via env var
+LOG_CONFIG=my_logging.json python worker.py
+
+# run_workflow.py — override via CLI flag
+python run_workflow.py --log-config my_logging.json
 ```
 
-**Terminal 2 — run a sentiment analysis workflow**
+To disable file logging entirely and use stdout only, pass an empty string:
+
 ```bash
-# Default product: Sony WH-1000XM5 Headphones, 15 reviews, mock scraper
-python run_workflow.py
-
-# Custom product
-python run_workflow.py --product-name "Kindle Paperwhite" --product-id B09SWRYPB9 --max-reviews 20
-
-# Query live progress of a running workflow (paste the workflow ID from Terminal 2 output)
-python run_workflow.py --query-only sentiment-B09XS7JWHH-abc12345
+LOG_CONFIG="" python worker.py
+python run_workflow.py --log-config ""
 ```
 
-**Verify the database was written**
+Individual pytest settings can be overridden inline without editing `pytest.ini`:
+
 ```bash
-# Summary of each analysis run
-sqlite3 sentiment_results.db "SELECT id, product_name, source, review_count, avg_score, status, run_at FROM analysis_runs;"
+# Enable live terminal output
+pytest tests/ -v -o "log_cli=true" -o "log_cli_level=DEBUG"
 
-# Reviews stored for a specific run (replace 1 with the run id)
-sqlite3 sentiment_results.db "SELECT review_id, reviewer, rating, title FROM reviews WHERE run_id = 1;"
-
-# Sentiment scores joined to review text
-sqlite3 sentiment_results.db "
-SELECT r.reviewer, r.rating, r.title, s.compound, s.positive, s.negative, s.neutral
-FROM reviews r
-JOIN sentiment_scores s ON s.review_id = r.review_id AND s.run_id = r.run_id
-ORDER BY s.compound DESC
-LIMIT 20;"
-
-# Row counts across all three tables
-sqlite3 sentiment_results.db "
-SELECT 'analysis_runs' AS tbl, COUNT(*) AS rows FROM analysis_runs
-UNION ALL SELECT 'reviews', COUNT(*) FROM reviews
-UNION ALL SELECT 'sentiment_scores', COUNT(*) FROM sentiment_scores;"
+# Write to a different log file
+pytest tests/ -v -o "log_file=logs/my_run.log"
 ```
 
----
+### Log levels
 
-## Temporal Patterns Demonstrated
+| Logger | Default level | What it emits |
+|---|---|---|
+| `worker` | INFO | startup line with namespace and task queue |
+| `activities.scrape_reviews` | INFO | scrape start / completion with review count; DEBUG per heartbeat page |
+| `activities.analyze_sentiment` | DEBUG | per-review compound score (silent at default INFO level) |
+| `activities.store_results` | INFO | DB commit with `run_id`, `review_count`, `avg_compound` |
+| `workflows.sentiment_workflow` | INFO | stage transitions via `workflow.logger` (Temporal's determinism-safe logger) |
 
-| Pattern | Where |
-|---|---|
-| `@workflow.defn` / `@workflow.run` | `workflows/sentiment_workflow.py` |
-| `@activity.defn` | `activities/*.py` |
-| Heartbeating (`activity.heartbeat`) | `activities/scrape_reviews.py` → `scrapers/mock_scraper.py` |
-| Retry policies with exponential backoff | module-level constants in `sentiment_workflow.py` |
-| Fan-out / fan-in (`asyncio.gather`) | `sentiment_workflow.py` Stage 2 |
-| Query handler (`@workflow.query`) | `SentimentAnalysisWorkflow.get_progress` |
-| Temporal Cloud connection (TLS + API key) | `worker.py`, `run_workflow.py` |
-| Workflow determinism | no randomness or I/O in workflow code; all side effects in activities |
-| Idempotent activity design | mock scraper seeded on `product_id + page` → safe to retry |
+`activities.*` loggers are set to `DEBUG` in the default `logging.json`, so per-review scores appear in `logs/temporal_pipeline.log` but not on stdout.
 
 ---
 

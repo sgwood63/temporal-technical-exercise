@@ -79,6 +79,8 @@ class SentimentAnalysisWorkflow:
             reviews_analyzed=0,
             message=f"Scraping reviews for '{config.product_name}' via {config.scraper_type}",
         )
+        workflow.logger.info("Stage: scraping — product_id=%s scraper=%s",
+                             config.product_id, config.scraper_type)
 
         reviews: list[Review] = await workflow.execute_activity(
             scrape_reviews_activity,
@@ -98,6 +100,7 @@ class SentimentAnalysisWorkflow:
             reviews_analyzed=0,
             message=f"Analyzing sentiment for {len(reviews)} reviews",
         )
+        workflow.logger.info("Stage: analyzing — reviews=%d", len(reviews))
 
         # asyncio.gather fires all N activity executions simultaneously.
         # Each review is an independent unit of work and can be retried on its
@@ -121,6 +124,7 @@ class SentimentAnalysisWorkflow:
             reviews_analyzed=len(scores),
             message=f"Aggregating {len(scores)} scores and storing results",
         )
+        workflow.logger.info("Stage: storing — scores=%d", len(scores))
 
         avg_compound = sum(s.compound for s in scores) / len(scores)
         breakdown = SentimentBreakdown(
@@ -153,5 +157,7 @@ class SentimentAnalysisWorkflow:
             reviews_analyzed=len(scores),
             message=f"Complete. avg_compound={avg_compound:.4f} over {len(scores)} reviews",
         )
+        workflow.logger.info("Stage: done — avg_compound=%+.4f reviews=%d run_id=%s",
+                             avg_compound, len(scores), stored_result.run_id)
 
         return stored_result

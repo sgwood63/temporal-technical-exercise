@@ -22,6 +22,7 @@ import uuid
 from dotenv import load_dotenv
 from temporalio.client import Client, TLSConfig
 
+from logging_config import configure_logging
 from models.data_models import ProductConfig
 from workflows.sentiment_workflow import SentimentAnalysisWorkflow
 
@@ -102,7 +103,11 @@ def main() -> None:
                         help="Scraper plugin to use (default: mock)")
     parser.add_argument("--query-only", metavar="WORKFLOW_ID",
                         help="Query the live progress of an already-running workflow")
+    parser.add_argument("--log-config", metavar="PATH",
+                        help="Path to a JSON logging config file (logging.config.dictConfig format)")
     args = parser.parse_args()
+
+    configure_logging(config_file=args.log_config)
 
     if args.query_only:
         asyncio.run(query_workflow(args.query_only))

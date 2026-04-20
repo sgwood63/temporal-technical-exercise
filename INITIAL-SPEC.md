@@ -23,7 +23,7 @@ I am going to use Claude Code to help with the implementation. I have already us
 
 ## Initial thoughts on implementing the exercise
 
-- This will be a Python script
+- This will be a Python script with logging.
 - I want to use Temporal Cloud. I already have an evaluation account, and used it for temporal-getting-started.
 - I want to use Temporal APIs, tools and best practices. Check on the Temporal web site and documentation to see whether there are examples that help with this data integration to analysis use case.
 - I want to use Claude Code best practices, like defining a CLAUDE.md
@@ -39,3 +39,17 @@ I am going to use Claude Code to help with the implementation. I have already us
 ## Testing
 
 I want tests for the workflows that include occasional and final failures for all the activities. There needs to be an option to test using Temporal Cloud, with indications that these are test workflows.
+
+## README structure
+
+- Introduction
+- Architecture
+- Project Structure
+- Temporal Patterns Demonstrated
+- Prerequisites
+- Setup
+- Running
+- Testing
+- Logging
+- Extending to Real Amazon Scraping
+- Notes on Design Choices
