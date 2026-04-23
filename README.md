@@ -12,6 +12,7 @@
 - [Testing](#testing)
 - [Logging](#logging)
 - [Extending to Real Amazon Scraping](#extending-to-real-amazon-scraping)
+- [Developer Tooling — Claude Code & Temporal Skill](#developer-tooling--claude-code--temporal-skill)
 - [Notes on Design Choices](#notes-on-design-choices)
 - [Reliability Improvements](#reliability-improvements)
 
@@ -323,6 +324,75 @@ The scraper layer is designed to be pluggable:
 3. Pass `--scraper amazon` to `run_workflow.py`
 
 No changes to the activity, workflow, or any other layer are required.
+
+---
+
+## Developer Tooling — Claude Code & Temporal Skill
+
+This project was built and reviewed using [Claude Code](https://claude.ai/code) with the built-in `temporal-developer` skill. The skill provides Temporal-specific guidance, code review, and debugging assistance directly in the terminal.
+
+### Setup
+
+Install Claude Code as a CLI tool or VS Code extension:
+
+```bash
+# macOS/Linux
+npm install -g @anthropic-ai/claude-code
+
+# Or install the VS Code extension from the marketplace: "Claude Code"
+```
+
+No additional configuration is required for the `temporal-developer` skill — it is built into Claude Code and activates automatically.
+
+### When the skill activates
+
+The `temporal-developer` skill triggers automatically whenever Claude Code detects Temporal SDK usage in the open files or conversation context. Specifically, it activates when:
+
+- Code imports a Temporal SDK (`temporalio`, `@temporalio/client`, etc.)
+- You ask about workflows, activities, workers, or the Temporal CLI
+- You mention Temporal concepts: signals, queries, heartbeats, versioning, `continue-as-new`, child workflows, saga patterns, or non-determinism errors
+- You're debugging issues like stuck workflows, activity retries, or `WorkflowAlreadyStartedError`
+
+You can also invoke it explicitly for a focused review:
+
+```
+review the codebase using the temporal skill to recommend any improvements
+```
+
+### What the skill covers
+
+The `temporal-developer` skill understands Temporal patterns across Python, TypeScript, Go, Java, and .NET. For this project it was used to review:
+
+| Area | What was checked |
+|---|---|
+| Heartbeating | Whether all long-running or fan-out activities call `activity.heartbeat()` and have matching `heartbeat_timeout` in `execute_activity` |
+| Retry policies | Whether `backoff_coefficient` is set, retry limits are appropriate, and non-retryable errors are classified with `ApplicationError(non_retryable=True)` |
+| Worker configuration | Whether `max_concurrent_activity_task_executions` is set to prevent unbounded task acceptance |
+| Activity idempotency | Whether retried activities produce duplicate side effects (e.g., duplicate DB rows) |
+| Workflow determinism | Whether any non-deterministic operations (I/O, randomness, `datetime.now()`) appear in workflow code |
+| Dataclass contracts | Whether input types validate their fields before entering the workflow history |
+| Database integrity | Whether foreign keys are enforced and join columns are indexed |
+
+### Useful prompts for this project
+
+```
+# Full best-practice review
+review the codebase using the temporal skill to recommend any improvements
+
+# Debug a stuck workflow
+my workflow has been in the "analyzing" stage for 10 minutes, help me diagnose it
+
+# Add a new Temporal pattern
+add a signal handler to SentimentAnalysisWorkflow that allows cancelling mid-pipeline
+
+# Review a specific activity
+does store_results_activity follow Temporal best practices for idempotency and heartbeating?
+
+# Explain an error from the Temporal Cloud UI
+I'm seeing "Activity task timed out (StartToClose)" — what causes this and how do I fix it?
+```
+
+The [Reliability Improvements](#reliability-improvements) section documents the specific gaps the skill identified in this codebase and the changes made to address them.
 
 ---
 
