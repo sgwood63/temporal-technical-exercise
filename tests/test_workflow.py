@@ -1,13 +1,18 @@
+import sqlite3
+from unittest.mock import MagicMock, patch
+
 import pytest
 from temporalio import activity
 from temporalio.client import WorkflowFailureError
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.worker import Worker
 
+from activities.scrape_reviews import scrape_reviews_activity
 from models.data_models import (
     AverageResult,
     ProductConfig,
     Review,
+    SentimentBreakdown,
     SentimentScore,
     WorkflowProgress,
 )
@@ -272,3 +277,102 @@ async def test_query_handler_progress(workflow_env, product_config):
         assert progress.reviews_scraped >= 0
         assert progress.reviews_analyzed >= 0
         await handle.result()
+
+
+def test_dataclass_validation():
+    """__post_init__ guards reject invalid field values before they enter the workflow."""
+    with pytest.raises(ValueError, match="max_reviews"):
+        ProductConfig(product_name="X", product_id="Y", source_url="Z", max_reviews=0)
+
+    with pytest.raises(ValueError, match="product_id"):
+        ProductConfig(product_name="X", product_id="", source_url="Z", max_reviews=1)
+
+    with pytest.raises(ValueError, match="rating"):
+        Review(review_id="r1", product_id="P1", reviewer="A", rating=0,
+               title="T", text="X", date="2025-01-01", source="test")
+
+    with pytest.raises(ValueError, match="rating"):
+        Review(review_id="r1", product_id="P1", reviewer="A", rating=6,
+               title="T", text="X", date="2025-01-01", source="test")
+
+    # Boundary values should not raise
+    ProductConfig(product_name="X", product_id="Y", source_url="Z", max_reviews=1)
+    Review(review_id="r1", product_id="P1", reviewer="A", rating=1,
+           title="T", text="X", date="2025-01-01", source="test")
+    Review(review_id="r1", product_id="P1", reviewer="A", rating=5,
+           title="T", text="X", date="2025-01-01", source="test")
+
+
+async def test_invalid_scraper_type(workflow_env):
+    """An unknown scraper_type raises a non-retryable ApplicationError — workflow fails immediately."""
+    config = ProductConfig(
+        product_name="Test Product",
+        product_id="TEST-INVALID",
+        source_url="https://example.com",
+        max_reviews=3,
+        scraper_type="nonexistent_scraper",
+    )
+    async with Worker(
+        workflow_env.client,
+        task_queue=TASK_QUEUE,
+        workflows=[SentimentAnalysisWorkflow],
+        activities=[
+            scrape_reviews_activity,  # real activity so ApplicationError path is exercised
+            make_sentiment_activity(0),
+            make_store_activity(0),
+        ],
+    ):
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await workflow_env.client.execute_workflow(
+                SentimentAnalysisWorkflow.run,
+                config,
+                id=unique_workflow_id("invalid-scraper"),
+                task_queue=TASK_QUEUE,
+            )
+        # Non-retryable ApplicationError propagates through the workflow failure chain:
+        # WorkflowFailureError → ActivityError → ApplicationError
+        activity_err = exc_info.value.cause
+        assert isinstance(activity_err, ActivityError)
+        app_err = activity_err.cause
+        assert isinstance(app_err, ApplicationError)
+        assert "nonexistent_scraper" in str(app_err)
+
+
+async def test_store_activity_idempotency(tmp_path):
+    """store_results_activity returns the existing DB row on retry without inserting a duplicate."""
+    from activities.store_results import store_results_activity
+    from db.init_db import init_db
+
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+
+    scores = [SentimentScore(review_id="r1", compound=0.5, positive=0.5, negative=0.0, neutral=0.5)]
+    reviews_list = [Review(review_id="r1", product_id="P1", reviewer="Alice", rating=4,
+                           title="Good", text="Works well", date="2025-01-01", source="test")]
+    result = AverageResult(
+        product_id="P1",
+        product_name="Product 1",
+        avg_compound=0.5,
+        review_count=1,
+        breakdown=SentimentBreakdown(positive_count=1, negative_count=0, neutral_count=0),
+        scores=scores,
+        reviews=reviews_list,
+    )
+
+    mock_info = MagicMock()
+    mock_info.workflow_run_id = "test-wf-run-idempotency"
+
+    with patch("activities.store_results.DB_PATH", db_path), \
+         patch("activities.store_results.activity.info", return_value=mock_info):
+        result1 = await store_results_activity(result)
+        assert result1.run_id == "1"
+
+        # Simulate a retry: Temporal re-sends the original input (run_id=None)
+        result.run_id = None
+        result2 = await store_results_activity(result)
+        assert result2.run_id == "1"  # same row, not a new insert
+
+    row_count = sqlite3.connect(db_path).execute(
+        "SELECT COUNT(*) FROM analysis_runs"
+    ).fetchone()[0]
+    assert row_count == 1

@@ -79,7 +79,7 @@ async def run_workflow(config: ProductConfig) -> None:
     print("Waiting for result... (Ctrl-C to detach; re-query with --query-only)")
     print()
 
-    result = await handle.result()
+    result = await asyncio.wait_for(handle.result(), timeout=300.0)
 
     print("═" * 50)
     print(f"  Product   : {result.product_name}")

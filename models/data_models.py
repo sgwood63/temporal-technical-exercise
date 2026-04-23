@@ -10,6 +10,12 @@ class ProductConfig:
     max_reviews: int = 15
     scraper_type: str = "mock"
 
+    def __post_init__(self) -> None:
+        if self.max_reviews < 1:
+            raise ValueError(f"max_reviews must be >= 1, got {self.max_reviews}")
+        if not self.product_id:
+            raise ValueError("product_id must not be empty")
+
 
 @dataclass
 class Review:
@@ -22,6 +28,10 @@ class Review:
     date: str            # ISO date string e.g. "2024-11-15"
     source: str          # e.g. "amazon_mock" or "amazon"
     verified_purchase: bool = True
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.rating <= 5:
+            raise ValueError(f"rating must be 1–5, got {self.rating}")
 
 
 @dataclass

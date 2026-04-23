@@ -33,6 +33,7 @@ _SCRAPE_RETRY = RetryPolicy(
 _SENTIMENT_RETRY = RetryPolicy(
     maximum_attempts=2,
     initial_interval=timedelta(seconds=2),
+    backoff_coefficient=1.5,
 )
 
 _STORE_RETRY = RetryPolicy(
@@ -110,6 +111,7 @@ class SentimentAnalysisWorkflow:
                 analyze_sentiment_activity,
                 review,
                 start_to_close_timeout=timedelta(seconds=30),
+                heartbeat_timeout=timedelta(seconds=10),
                 retry_policy=_SENTIMENT_RETRY,
             )
             for review in reviews
@@ -148,6 +150,7 @@ class SentimentAnalysisWorkflow:
             store_results_activity,
             result,
             start_to_close_timeout=timedelta(seconds=60),
+            heartbeat_timeout=timedelta(seconds=15),
             retry_policy=_STORE_RETRY,
         )
 

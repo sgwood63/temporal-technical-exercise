@@ -50,6 +50,8 @@ async def main() -> None:
             analyze_sentiment_activity,
             store_results_activity,
         ],
+        max_concurrent_activity_task_executions=50,
+        max_concurrent_workflow_task_executions=10,
     )
 
     logger.info("Worker started — namespace=%s queue=%s", os.environ["TEMPORAL_NAMESPACE"], task_queue)

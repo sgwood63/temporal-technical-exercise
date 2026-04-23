@@ -29,4 +29,5 @@ async def analyze_sentiment_activity(review: Review) -> SentimentScore:
         neutral=scores["neu"],
     )
     logger.debug("Sentiment — review_id=%s compound=%+.4f", review.review_id, score.compound)
+    activity.heartbeat({"review_id": review.review_id})
     return score

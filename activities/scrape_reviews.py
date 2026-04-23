@@ -2,6 +2,7 @@ import logging
 from datetime import timedelta
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from models.data_models import ProductConfig, Review
 from scrapers.registry import get_scraper
@@ -21,7 +22,11 @@ async def scrape_reviews_activity(config: ProductConfig) -> list[Review]:
     logger.info("Scraping reviews — product_id=%s scraper=%s max=%d",
                 config.product_id, config.scraper_type, config.max_reviews)
 
-    scraper = get_scraper(config.scraper_type)
+    try:
+        scraper = get_scraper(config.scraper_type)
+    except ValueError as exc:
+        # Unknown scraper type is a configuration error — retrying won't help.
+        raise ApplicationError(str(exc), non_retryable=True) from exc
 
     def heartbeat_fn(state: dict) -> None:
         logger.debug("Heartbeat — page=%s", state.get("page"))

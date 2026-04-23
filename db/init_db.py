@@ -5,14 +5,15 @@ DB_PATH = os.environ.get("DB_PATH", "sentiment_results.db")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS analysis_runs (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id   TEXT    NOT NULL,
-    product_name TEXT    NOT NULL,
-    run_at       TEXT    NOT NULL,
-    review_count INTEGER NOT NULL,
-    avg_score    REAL    NOT NULL,
-    status       TEXT    NOT NULL,
-    source       TEXT    NOT NULL
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id       TEXT    NOT NULL,
+    product_name     TEXT    NOT NULL,
+    run_at           TEXT    NOT NULL,
+    review_count     INTEGER NOT NULL,
+    avg_score        REAL    NOT NULL,
+    status           TEXT    NOT NULL,
+    source           TEXT    NOT NULL,
+    workflow_run_id  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
@@ -37,11 +38,28 @@ CREATE TABLE IF NOT EXISTS sentiment_scores (
     negative  REAL    NOT NULL,
     neutral   REAL    NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_reviews_run_id ON reviews(run_id);
+CREATE INDEX IF NOT EXISTS idx_sentiment_run_id ON sentiment_scores(run_id);
+-- Partial unique index: only enforce uniqueness when workflow_run_id is present,
+-- so existing rows with NULL are unaffected after schema migrations.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_runs_workflow_run_id
+    ON analysis_runs(workflow_run_id) WHERE workflow_run_id IS NOT NULL;
+"""
+
+# Migrate existing DBs: add workflow_run_id column if it was created before this column existed.
+_MIGRATION = """
+ALTER TABLE analysis_runs ADD COLUMN workflow_run_id TEXT;
 """
 
 
 def init_db(db_path: str = DB_PATH) -> None:
     conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        conn.executescript(_MIGRATION)
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.executescript(_SCHEMA)
     conn.commit()
     conn.close()

@@ -13,6 +13,7 @@
 - [Logging](#logging)
 - [Extending to Real Amazon Scraping](#extending-to-real-amazon-scraping)
 - [Notes on Design Choices](#notes-on-design-choices)
+- [Reliability Improvements](#reliability-improvements)
 
 ---
 
@@ -91,7 +92,7 @@ temporal-technical-exercise/
 │   └── init_db.py              # SQLite schema creation
 ├── tests/
 │   ├── conftest.py             # shared fixtures (WorkflowEnvironment, ProductConfig)
-│   └── test_workflow.py        # 8 workflow tests
+│   └── test_workflow.py        # 11 workflow tests
 ├── pytest.ini
 ├── CLAUDE.md                   # Claude Code guidelines for this project
 ├── requirements.txt
@@ -106,13 +107,15 @@ temporal-technical-exercise/
 |---|---|
 | `@workflow.defn` / `@workflow.run` | `workflows/sentiment_workflow.py` |
 | `@activity.defn` | `activities/*.py` |
-| Heartbeating (`activity.heartbeat`) | `activities/scrape_reviews.py` → `scrapers/mock_scraper.py` |
-| Retry policies with exponential backoff | module-level constants in `sentiment_workflow.py` |
+| Heartbeating (`activity.heartbeat`) with `heartbeat_timeout` | all three activities; `heartbeat_timeout` set on every `execute_activity` call |
+| Retry policies with exponential backoff | module-level constants in `sentiment_workflow.py`; each policy has explicit `backoff_coefficient` |
 | Fan-out / fan-in (`asyncio.gather`) | `sentiment_workflow.py` Stage 2 |
 | Query handler (`@workflow.query`) | `SentimentAnalysisWorkflow.get_progress` |
 | Temporal Cloud connection (TLS + API key) | `worker.py`, `run_workflow.py` |
 | Workflow determinism | no randomness or I/O in workflow code; all side effects in activities |
-| Idempotent activity design | mock scraper seeded on `product_id + page` → safe to retry |
+| Idempotent activity design | scraper seeded on `product_id + page`; store activity uses `workflow_run_id` as idempotency key |
+| `ApplicationError(non_retryable=True)` | `activities/scrape_reviews.py` — unknown scraper type fails immediately without retrying |
+| Worker concurrency limits | `max_concurrent_activity_task_executions` and `max_concurrent_workflow_task_executions` set in `worker.py` |
 
 ---
 
@@ -206,7 +209,7 @@ UNION ALL SELECT 'sentiment_scores', COUNT(*) FROM sentiment_scores;"
 
 ## Testing
 
-The test suite exercises `SentimentAnalysisWorkflow` end-to-end. Two modes are supported:
+The test suite exercises `SentimentAnalysisWorkflow` end-to-end with 11 tests. Two modes are supported:
 
 **Local (default)** — uses Temporal's in-process test server (`WorkflowEnvironment.start_time_skipping()`), which skips retry backoffs so all 8 tests complete in under a second. No Temporal Cloud connection or running worker needed.
 
@@ -221,7 +224,7 @@ pytest tests/ -v
 pytest tests/ -v --temporal-cloud
 ```
 
-All 8 tests run against cloud. The three final-failure tests exhaust all retry attempts with real backoff delays — this is the most interesting thing to observe in the Cloud UI: the full retry history, the backoff progression between attempts, and the final `WorkflowExecutionFailed` status. Expect the full suite to take ~2 minutes in cloud mode (the store final-failure test alone waits ~75 s across 5 retry intervals).
+All 11 tests run against cloud. The three final-failure tests exhaust all retry attempts with real backoff delays — this is the most interesting thing to observe in the Cloud UI: the full retry history, the backoff progression between attempts, and the final `WorkflowExecutionFailed` status. Expect the full suite to take ~3 minutes in cloud mode (the store final-failure test alone waits ~75 s across 5 retry intervals).
 
 To find test executions in the UI, filter by:
 ```
@@ -241,6 +244,9 @@ or by task queue `test-sentiment-tq` (kept separate from the production task que
 | `test_sentiment_final_failure` | `analyze_sentiment_activity` exhausts both attempts for every review → `WorkflowFailureError` |
 | `test_store_final_failure` | `store_results_activity` exhausts all 5 attempts → `WorkflowFailureError` |
 | `test_query_handler_progress` | `get_progress()` query returns a valid `WorkflowProgress` with a recognized `stage` |
+| `test_dataclass_validation` | `ProductConfig` and `Review` `__post_init__` guards reject invalid field values (`max_reviews < 1`, empty `product_id`, `rating` outside 1–5) |
+| `test_invalid_scraper_type` | Unknown `scraper_type` raises `ApplicationError(non_retryable=True)` — verified by inspecting the `WorkflowFailureError → ActivityError → ApplicationError` chain |
+| `test_store_activity_idempotency` | Calling `store_results_activity` twice with the same `workflow_run_id` produces exactly one row in `analysis_runs`; the second call returns the existing `run_id` |
 
 ### Design notes
 
@@ -330,3 +336,69 @@ VADER is lexicon-based — no model download, no GPU, works immediately. For a d
 
 **Why SQLite?**
 Zero configuration, no server process, standard library. The schema is normalized enough to support downstream BI tools like Apache Superset (connect via SQLite driver). For production scale, the `store_results_activity` would simply point at Postgres or BigQuery — the Temporal workflow is unchanged.
+
+---
+
+## Reliability Improvements
+
+The following changes were made after a Temporal SDK best-practice review. Each addresses a specific gap in how Temporal detects failures, retries work, and enforces operational constraints.
+
+### Heartbeating on all activities
+
+**Before:** Only `scrape_reviews_activity` called `activity.heartbeat()` and only it had `heartbeat_timeout` set in the workflow's `execute_activity` call. `analyze_sentiment_activity` and `store_results_activity` had no heartbeat at all.
+
+**Problem:** `heartbeat_timeout` is only meaningful if the activity actually calls `activity.heartbeat()`. Without it, Temporal cannot distinguish a healthy long-running activity from a worker that has silently crashed. Temporal will wait the full `start_to_close_timeout` (30 s for sentiment, 60 s for store) before declaring the activity failed and retrying it — a significant delay in crash detection, especially for the fan-out sentiment tasks where every one of N parallel activities could hang simultaneously.
+
+**Fix:**
+- `analyze_sentiment_activity` calls `activity.heartbeat({"review_id": ...})` once before returning — sufficient for a fast activity, but it resets the heartbeat timer so Temporal knows the worker is alive.
+- `store_results_activity` calls `activity.heartbeat({"reviews_inserted": i + 1})` every 50 rows in the insert loop — important for large review counts where the bulk insert takes measurable time.
+- Both activities now have `heartbeat_timeout` set in their `execute_activity` calls (`10 s` and `15 s` respectively). If a worker crashes mid-execution, Temporal retries on another worker within that window rather than waiting for the full timeout.
+
+### Exponential backoff on `_SENTIMENT_RETRY`
+
+**Before:** `_SENTIMENT_RETRY` had no `backoff_coefficient`, which defaults to `1.0` — a fixed 2 s retry interval regardless of attempt number.
+
+**Problem:** Fixed-interval retries cause retry storms. If many sentiment activities fail simultaneously (e.g., a transient memory pressure spike), they all retry at the same instant, recreating the same pressure. Exponential backoff spreads the load.
+
+**Fix:** Added `backoff_coefficient=1.5`, making the retry intervals 2 s → 3 s → 4.5 s. This is consistent with `_SCRAPE_RETRY` (coefficient 2.0) and `_STORE_RETRY` (coefficient 2.0), which already had it set.
+
+### Worker concurrency limits
+
+**Before:** The `Worker` constructor had no `max_concurrent_activity_task_executions` or `max_concurrent_workflow_task_executions`.
+
+**Problem:** A workflow with hundreds of reviews fires hundreds of sentiment activity tasks simultaneously. Without a cap, the worker accepts all of them, loading as many VADER analyses as the Temporal server schedules. This can exhaust memory and CPU on a single worker process.
+
+**Fix:** Set `max_concurrent_activity_task_executions=50` and `max_concurrent_workflow_task_executions=10` in `worker.py`. The worker will pull at most 50 activity tasks at once from the task queue; excess tasks remain queued in Temporal until capacity is available.
+
+### Store activity idempotency via `workflow_run_id`
+
+**Before:** `store_results_activity` did a plain `INSERT INTO analysis_runs ...` with no deduplication.
+
+**Problem:** If the activity completes its SQLite commit but the worker crashes before it can report completion to Temporal, Temporal will schedule a retry. The retry inserts a second `analysis_runs` row for the same workflow execution — a silent duplicate that inflates row counts and skews any aggregation over historical runs.
+
+**Fix:**
+- Added a `workflow_run_id TEXT` column to `analysis_runs`. On each invocation, `activity.info().workflow_run_id` is used as an idempotency key: the activity first checks whether a row with that `workflow_run_id` already exists, and if so returns the existing `run_id` without re-inserting.
+- A partial unique index (`WHERE workflow_run_id IS NOT NULL`) enforces the constraint at the database level so concurrent retries can't race past the check.
+- A migration step in `init_db()` handles existing databases that don't yet have the column.
+
+### `ApplicationError(non_retryable=True)` for configuration errors
+
+**Before:** If `ProductConfig.scraper_type` named an unregistered scraper, `get_scraper()` raised a plain `ValueError`. Temporal treated this as a retryable failure and attempted all 3 scrape retries before giving up.
+
+**Problem:** An unknown scraper type is a configuration error, not a transient fault. Retrying it wastes time and pollutes the workflow event history with redundant `ActivityTaskFailed` events.
+
+**Fix:** `scrape_reviews_activity` catches `ValueError` from the registry lookup and re-raises as `ApplicationError(non_retryable=True)`. Temporal marks the activity failed immediately on the first attempt and propagates the error to the workflow without consuming any retry budget.
+
+### Input validation on dataclasses
+
+**Before:** `ProductConfig` and `Review` were plain dataclasses with no field validation.
+
+**Problem:** An invalid value (e.g., `max_reviews=0`, `rating=7`) would serialize into the workflow history and potentially cause confusing arithmetic errors deep in the pipeline rather than a clear failure at the input boundary.
+
+**Fix:** Added `__post_init__` methods to `ProductConfig` (validates `max_reviews >= 1` and non-empty `product_id`) and `Review` (validates `1 <= rating <= 5`). These raise `ValueError` before the workflow is even started, giving callers an immediate and descriptive error.
+
+### Database indexes and foreign key enforcement
+
+**Before:** The SQLite schema had no indexes beyond implicit primary keys, and `PRAGMA foreign_keys` was never enabled (SQLite disables FK enforcement by default).
+
+**Fix:** Added `CREATE INDEX` statements on `reviews.run_id` and `sentiment_scores.run_id` — the join columns for any result-fetching query. Added `PRAGMA foreign_keys = ON` to both `init_db()` and each connection opened in `store_results_activity` so referential integrity is actually enforced at runtime.
