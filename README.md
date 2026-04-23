@@ -15,6 +15,7 @@
 - [Developer Tooling — Claude Code & Temporal Skill](#developer-tooling--claude-code--temporal-skill)
 - [Notes on Design Choices](#notes-on-design-choices)
 - [Reliability Improvements](#reliability-improvements)
+- [Tech Screen Q&A](#tech-screen-qa)
 
 ---
 
@@ -472,3 +473,58 @@ The following changes were made after a Temporal SDK best-practice review. Each 
 **Before:** The SQLite schema had no indexes beyond implicit primary keys, and `PRAGMA foreign_keys` was never enabled (SQLite disables FK enforcement by default).
 
 **Fix:** Added `CREATE INDEX` statements on `reviews.run_id` and `sentiment_scores.run_id` — the join columns for any result-fetching query. Added `PRAGMA foreign_keys = ON` to both `init_db()` and each connection opened in `store_results_activity` so referential integrity is actually enforced at runtime.
+
+---
+
+## Tech Screen Q&A
+
+### Q: What is the behavior of the system if a database commit fails? Is there a possibility that the workflow does not know the commit? How does this app address this problem at the Temporal level? Where in the code?
+
+#### Failure scenarios and how each is handled
+
+**1. `conn.commit()` actually fails (`activities/store_results.py:73`)**
+
+The exception propagates out of the activity. Temporal catches it and retries using `_STORE_RETRY` (`workflows/sentiment_workflow.py:39-44`):
+
+```
+5 attempts, 5 s → 10 s → 20 s → 40 s → 60 s (capped)
+```
+
+The workflow doesn't need to do anything — it just awaits the activity's future, and Temporal delivers a result or terminal failure.
+
+**2. The silent danger: commit succeeds but worker crashes before Temporal records completion**
+
+This is the real risk. The sequence:
+1. `conn.commit()` succeeds — row is in SQLite
+2. Worker crashes (OOM, SIGKILL, network partition)
+3. Temporal never received the activity completion
+4. Temporal retries the activity on a healthy worker
+
+Without protection, this produces a **duplicate row**. The app solves this with an **idempotency guard** (`activities/store_results.py:31-39`):
+
+```python
+cursor.execute(
+    "SELECT id FROM analysis_runs WHERE workflow_run_id = ?",
+    (workflow_run_id,),
+)
+existing = cursor.fetchone()
+if existing:
+    result.run_id = str(existing[0])
+    return result   # short-circuit — no duplicate insert
+```
+
+The key is `workflow_run_id` from `activity.info().workflow_run_id` — Temporal's own run ID, stored as a unique column, so any retry for the same workflow run finds the existing row and returns it cleanly.
+
+**3. Worker dies mid-insert (between the review inserts and `conn.commit()`)**
+
+The `heartbeat_timeout=timedelta(seconds=15)` on the store activity (`workflows/sentiment_workflow.py:153`) ensures Temporal detects the dead worker quickly. The retry starts fresh — SQLite's transaction model means the uncommitted partial inserts are rolled back automatically (the `finally: conn.close()` at line 78 closes without committing, which is an implicit rollback). The idempotency check finds no row, so the full insert runs cleanly.
+
+#### Summary
+
+| Failure | Detected by | Recovery |
+|---|---|---|
+| `conn.commit()` raises | Temporal catches activity exception | `_STORE_RETRY`: 5 attempts, exp backoff |
+| Worker crash mid-insert | `heartbeat_timeout=15s` → Temporal retries | Implicit SQLite rollback + clean retry |
+| Worker crash post-commit | Temporal retries (no completion recorded) | Idempotency check on `workflow_run_id` short-circuits |
+
+The behavior is exactly retry — the workflow is unaware of the distinction between the failure modes; it just awaits `store_results_activity` and gets either a result or an `ActivityError` after all retries are exhausted.
